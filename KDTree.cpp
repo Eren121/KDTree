@@ -77,46 +77,73 @@ void KDTree::init()
     //                    <----------------->    <--------------->
     // splitDistance:        if left                 if right
 
-    while(!stack.empty())
+    #pragma omp parallel default(none) shared(stack, std::cout)
     {
-        const auto mesh = std::move(stack.top().mesh);
-        Node& node = *stack.top().node;
-        const int dim = stack.top().dim;
-        const AABB aabb = stack.top().aabb;
-        const int level = stack.top().level;
-        stack.pop();
-
-        // Stop condition
-        // FOR TRIANGLES: it's not guaranteed we can have less a given number of triangles, so we always should
-        // Stop on a recursive condition
-        // We can also stop it if the next split don't split enough, let's say more than 50% of triangles are on both sides
-        if(mesh.size() > 100 && level < 10)
+        #pragma omp single
+        while(!stack.empty())
         {
-            node.split.dim = dim;
+            // Queue the stack tasks at once, then wait all
+            std::cout << "Spawn " << stack.size() << " tasks" << std::endl;
 
-            // We split at the center of the parent AABB
-            node.split.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
+            while(!stack.empty())
+            {
+                SplitStack arg;
 
-            AABB nearAABB = aabb;
-            nearAABB.max[dim] = node.split.p;
+                #pragma omp critical
+                {
+                    arg = std::move(stack.top());
+                    stack.pop();
+                }
 
-            AABB farAABB = aabb;
-            farAABB.min[dim] = nearAABB.max[dim];
+                #pragma omp task default(none) firstprivate(arg) shared(stack)
+                {
+                    auto mesh = std::move(arg.mesh);
+                    Node& node = *arg.node;
+                    const int dim = arg.dim;
+                    const AABB aabb = arg.aabb;
+                    const int level = arg.level;
 
-            auto [near, far] = split(mesh, node.split);
+                    constexpr int MAX_LEVEL = 5;
 
-            const int nextDim = (dim + 1) % 3;
+                    // Stop condition
+                    // FOR TRIANGLES: it's not guaranteed we can have less a given number of triangles, so we always should
+                    // Stop on a recursive condition
+                    // We can also stop it if the next split don't split enough, let's say more than 50% of triangles are on both sides
+                    if(mesh.size() > 100 && level < MAX_LEVEL)
+                    {
+                        node.split.dim = dim;
 
-            node.far = std::make_unique<Node>();
-            stack.push(SplitStack{nextDim, std::move(far), node.far.get(), farAABB, level + 1});
+                        // We split at the center of the parent AABB
+                        node.split.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
 
-            node.near = std::make_unique<Node>();
-            stack.push(SplitStack{nextDim, std::move(near), node.near.get(), nearAABB, level + 1});
-        }
-        else
-        {
-            // Leaf
-            node.mesh = std::move(mesh);
+                        AABB nearAABB = aabb;
+                        nearAABB.max[dim] = node.split.p;
+
+                        AABB farAABB = aabb;
+                        farAABB.min[dim] = nearAABB.max[dim];
+
+                        auto [near, far] = split(mesh, node.split);
+
+                        const int nextDim = (dim + 1) % 3;
+
+                        #pragma omp critical
+                        {
+                            node.far = std::make_unique<Node>();
+                            stack.push(SplitStack{nextDim, std::move(far), node.far.get(), farAABB, level + 1});
+
+                            node.near = std::make_unique<Node>();
+                            stack.push(SplitStack{nextDim, std::move(near), node.near.get(), nearAABB, level + 1});
+                        }
+                    }
+                    else
+                    {
+                        // Leaf
+                        node.mesh = std::move(mesh);
+                    }
+                }
+            }
+
+            #pragma omp taskwait
         }
     }
 }
@@ -192,7 +219,7 @@ void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, T
 std::pair<KDTree::MeshAsID, KDTree::MeshAsID> KDTree::split(const MeshAsID& mesh, const Line& axe)
 {
     MeshAsID parts[2];
-
+    
     // Iterate all triangles,
     // We can't split them as they can belong to both sides
     for(const auto& triangleID : mesh)

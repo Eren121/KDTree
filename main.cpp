@@ -4,6 +4,7 @@
 #include "KDTree.h"
 #include <chrono>
 #include <cfloat>
+#include <omp.h>
 
 class Timer
 {
@@ -61,8 +62,8 @@ KDTree::Mesh randomTriangles(int size, float bounds = 10.0f)
     {
         ret.emplace_back(
             vertices[i * 3 + 0],
-            vertices[i * 3 + 1],
-            vertices[i * 3 + 2]
+            vertices[i * 3 + 0] + vertices[i * 3 + 1] * 0.05f,
+            vertices[i * 3 + 0] + vertices[i * 3 + 2] * 0.05f
         );
     }
 
@@ -71,7 +72,7 @@ KDTree::Mesh randomTriangles(int size, float bounds = 10.0f)
 
 int main()
 {
-    const auto mesh = randomTriangles(500'000);
+    const auto mesh = randomTriangles(1'000'000);
     const auto aabb = KDTree::computeBoundingBox(mesh);
 
     KDTree kdtree;
