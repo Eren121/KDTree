@@ -4,22 +4,25 @@
 #include <vector>
 #include <cassert>
 #include <vector>
+#include <array>
 #include <stdexcept>
 #include <cmath>
 #include <stack>
 
 /**
- * @brief K-d tree of 3D float points.
+ * @brief K-d tree of 3D triangles.
  *
  * @see Variable names, and algorithm inspired by https://youtu.be/TrqK-atFfWY?t=2567
  */
 class KDTree
 {
 public:
-    /**** Utility structures ****/
     struct Point
     {
         float x, y, z;
+
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wreturn-type"
 
         float& operator[](int i)
         {
@@ -31,25 +34,47 @@ public:
                 case 2: return z;
             }
 
-            throw std::runtime_error("Invalid index");
+            assert(false && "Invalid index");
         }
+
+        #pragma GCC diagnostic pop
 
         const float& operator[](int i) const
         {
             return const_cast<Point&>(*this)[i];
         }
 
-        float distance(const Point& other) const
+        [[nodiscard]] float distance(const Point& other) const
         {
             return sqrtf(distanceSquared(other));
         }
 
-        float distanceSquared(const Point& other) const
+        [[nodiscard]] float distanceSquared(const Point& other) const
         {
             const float dx = (x - other.x);
             const float dy = (y - other.y);
             const float dz = (z - other.z);
             return dx*dx + dy*dy + dz*dz;
+        }
+
+        Point operator-(const Point& other) const
+        {
+            return {x - other.x, y - other.y, z - other.z};
+        }
+
+        Point operator*(float f) const
+        {
+            return {x * f, y * f, z * f};
+        }
+
+        Point operator+(const Point& other) const
+        {
+            return {x + other.x, y + other.y, z + other.z};
+        }
+
+        friend float dot(const Point& a, const Point& b)
+        {
+            return a.x * b.x + a.y * b.y + a.z * b.z;
         }
 
         template<typename T> friend T& operator<<(T& lhs, const Point& rhs)
@@ -59,33 +84,92 @@ public:
         }
     };
 
+    struct Triangle
+    {
+        using ID = int;
+        Point points[3];
+
+        Triangle(const Point& a, const Point& b, const Point& c) : points{a, b, c} {}
+    };
+
+    struct TriangleWithID : Triangle
+    {
+        ID id;
+    };
+
+    using Mesh = std::vector<Triangle>;
+    using MeshAsID = std::vector<Triangle::ID>;
+
     struct AABB
     {
         Point min, max;
 
-        bool inside(const Point& p) const
+        [[nodiscard]] bool inside(const Point& p) const
         {
             return p.x >= min.x && p.y >= min.y && p.z >= min.z
                 && p.x < max.x  && p.y < max.y  && p.z < max.z;
         }
     };
 
-public:
-    /**** Utility (static) functions ****/
+    enum Side
+    {
+        NEAR, FAR
+    };
 
     /**
-     * @brief Compute the bounding box of a set of points.
-     * @param points
-     *      The points to make the boudning box from.
-     *      If the set of points is empty, the returned value is undefined.
-     * @return
-     *      The bounding box of theses points.
-     *      The bounding box will be always of minimum size, i.e. there will be a vertex on each of the 6 faces of the
-     *      returned AABB.
+     * Axis aligned straight line.
      */
-    static AABB computeBoundingBox(const std::vector<Point> &points);
+    struct Line
+    {
+        /**
+         * The position of the straight line in the init dimension.
+         * As this is a straight line, it goes ad infinitum to the others 2 dimensions.
+         */
+        float p;
 
-    static float median(std::vector<float> vec);
+        /**
+         * The dimension of the init.
+         * 0 for X, 1 for Y, 2 for Z.
+         */
+        int dim;
+
+        /**
+         * Check on which side a point is from a straight line.
+         * @param point The point to check.
+         *
+         * @return
+         *      NEAR if the point is below the axe in the init dimension, otherwise FAR.
+         *      For example, the straight line X=5.5 is represented by {p=5.5, dim=0}.
+         *      Then for a point P=(3, 123, 456) query returns NEAR.
+         *      For a point P'=(6, 987, 654) query returns FAR.
+         */
+        [[nodiscard]] Side query(const Point& point) const
+        {
+            return point[dim] < p ? NEAR : FAR;
+        }
+    };
+
+public:
+    /**
+     * @brief Compute the bounding box of a set of triangles.
+     * .
+     * @param mesh
+     *      The triangles to make the bounding box from.
+     *      If the set of points is empty, the returned value is zero.
+     * @return
+     *      The bounding box of theses triangles..
+     *      The bounding box will be always of minimum size.
+     */
+    static AABB computeBoundingBox(const Mesh &mesh);
+
+    /**
+     * Find the closest point on a triangle from a given point.
+     */
+    static Point findClosestPointOnTriangle(const Point& query, const Triangle& triangle);
+
+    /**
+     * Check if a 3D point is inside a triangle
+     */
 
     static void store_min(float& current, float newValue)
     {
@@ -101,12 +185,35 @@ public:
         }
     }
 
+    /**
+     * @brief Split a set of triangles in left and right sets.
+     *
+     * @param mesh The mesh to init.
+     * @param axe The position of the init axe.
+     * @param dim The dimension of the init axe.
+     *
+     * @return A pair (left, right) of sets. Some triangles may be contained by both.
+     */
+    std::pair<MeshAsID, MeshAsID> split(const MeshAsID& mesh, const Line& axe);
 
 public:
     KDTree() = default;
-    explicit KDTree(const std::vector<Point>& points);
+    explicit KDTree(Mesh mesh);
 
-    Point computeNearestNeighbor(const Point& pos) const;
+    struct NPQueryRet
+    {
+        Point point;
+        Triangle::ID id;
+    };
+
+    /**
+     * Compute the nearest point on the mesh from the query position.
+     *
+     * @param pos The query position.
+     *
+     * @return A pair (point, id) where id is the ID of the triangle.
+     */
+    [[nodiscard]] NPQueryRet findNearestPointOnMesh(const Point& pos) const;
 
 private:
     /**
@@ -118,16 +225,11 @@ private:
          * @brief
          *      Children. Both of them or neither of them are null.
          */
-        std::unique_ptr<Node> left, right;
+        std::unique_ptr<Node> near, far;
 
-        /**
-         * The distance between the origin and the wall to split (for left node),
-         * or the distance from the wall and the end to split (for right node).
-         */
-        float splitDistance;
-        int splitDim;
+        Line split;
 
-        std::vector<Point> points;
+        MeshAsID mesh;
 
         /**
          * @return true if this node is a leaf node (it has no children).
@@ -135,31 +237,30 @@ private:
         bool leaf() const
         {
             // left or right it doesn't matter
-            return left == nullptr;
+            return near == nullptr;
         }
     };
 
+    /**
+     * We can't use the OS stack, because it is too small for our needs in recursion.
+     * Treat the members as the parameters of the recursive function.
+     */
     struct SplitStack
     {
-        int dim;
-        std::vector<Point> points;
-        Node* node;
-        AABB aabb;
+        int dim; ///< The dimension to the split
+        MeshAsID mesh; ///< The list of remaining candidates for this area, all inside aabb.
+        Node* node; ///< The node, allocated, to fill
+        AABB aabb; ///< The bounding box of the node.
+        int level;
     };
 
 private:
-    /**
-     * @brief Split the tree during the build.
-     * @param dim The dimension to split.
-     * @param points The list of remaining candidate points for this area, inside the AABB.
-     * @param node The node, allocated, to fill.
-     * @param aabb The bounding box of the node.
-     */
-    void split(std::stack<SplitStack>& stack);
+    void init();
 
-    void searchRecursive(const Point& pos, Node* node, float& currentDist, Point& currentNeighbor) const;
+    void searchRecursive(const Point& pos, Node* node, float& currentDist, Triangle::ID& currentID, Point& currentPoint) const;
 
 private:
+    std::vector<Triangle> m_mesh;
     AABB m_rootAABB;
     std::unique_ptr<Node> m_root;
 };

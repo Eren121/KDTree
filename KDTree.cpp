@@ -4,51 +4,35 @@
 #include <algorithm>
 #include <iostream>
 #include <cmath>
+#include <utility>
 
-float KDTree::median(std::vector<float> vec)
+KDTree::AABB KDTree::computeBoundingBox(const Mesh& mesh)
 {
-    size_t size = vec.size();
+    // Computing the AABB of a mesh is just the AABB of all points because an AABB is convex
 
-    if (size == 0)
-    {
-        return 0;  // Undefined, really.
-    }
-    else
-    {
-        std::sort(vec.begin(), vec.end());
-        if (size % 2 == 0)
-        {
-            return (vec[size / 2 - 1] + vec[size / 2]) / 2;
-        }
-        else
-        {
-            return vec[size / 2];
-        }
-    }
-}
+    AABB res{};
 
-KDTree::AABB KDTree::computeBoundingBox(const std::vector<Point>& points)
-{
-    AABB res;
-
-    if (!points.empty())
+    if(!mesh.empty())
     {
-        const auto& firstPoint = points.front();
+        const auto& firstPoint = mesh[0].points[0];
 
         // Initialize the bounding box to a point
-        for (int dim = 0; dim < 3; dim++)
+        for(int dim = 0; dim < 3; dim++)
         {
             res.min[dim] = firstPoint[dim];
             res.max[dim] = firstPoint[dim];
         }
 
         // Grow the bounding box for each point if needed
-        for (const Point& point: points)
+        for(const auto& triangle: mesh)
         {
-            for (int dim = 0; dim < 3; dim++)
+            for(const auto& point: triangle.points)
             {
-                store_min(res.min[dim], point[dim]);
-                store_max(res.max[dim], point[dim]);
+                for(int dim = 0; dim < 3; dim++)
+                {
+                    store_min(res.min[dim], point[dim]);
+                    store_max(res.max[dim], point[dim]);
+                }
             }
         }
     }
@@ -56,22 +40,31 @@ KDTree::AABB KDTree::computeBoundingBox(const std::vector<Point>& points)
     return res;
 }
 
-KDTree::KDTree(const std::vector<Point>& points)
+KDTree::KDTree(Mesh mesh)
+    : m_mesh(std::move(mesh)),
+      m_rootAABB(computeBoundingBox(m_mesh)),
+      m_root(std::make_unique<Node>())
 {
-    m_rootAABB = computeBoundingBox(points);
-
-    m_root = std::make_unique<Node>();
-
-    std::stack<SplitStack> stack;
-
-
-    stack.push(SplitStack{0, points, m_root.get(), m_rootAABB});
-
-    split(stack);
+    init();
 }
 
-void KDTree::split(std::stack<SplitStack>& stack)
+void KDTree::init()
 {
+    std::stack<SplitStack> stack;
+
+    {
+        // Initial candidates is the entire mesh
+        MeshAsID candidates;
+        candidates.reserve(m_mesh.size());
+
+        for(int i = 0; i < m_mesh.size(); i++)
+        {
+            candidates.push_back(i);
+        }
+
+        stack.push(SplitStack{0, std::move(candidates), m_root.get(), m_rootAABB, 0});
+    }
+
     // Split recursively in x, y, z, x, y, z...
     // Split at the center
 
@@ -84,87 +77,80 @@ void KDTree::split(std::stack<SplitStack>& stack)
     //                    <----------------->    <--------------->
     // splitDistance:        if left                 if right
 
-    while (!stack.empty())
+    while(!stack.empty())
     {
-        std::vector<Point> points = std::move(stack.top().points);
+        const auto mesh = std::move(stack.top().mesh);
         Node& node = *stack.top().node;
-        int dim = stack.top().dim;
-        AABB aabb = stack.top().aabb;
+        const int dim = stack.top().dim;
+        const AABB aabb = stack.top().aabb;
+        const int level = stack.top().level;
         stack.pop();
 
-
         // Stop condition
-        if (points.size() > 100)
+        // FOR TRIANGLES: it's not guaranteed we can have less a given number of triangles, so we always should
+        // Stop on a recursive condition
+        // We can also stop it if the next split don't split enough, let's say more than 50% of triangles are on both sides
+        if(mesh.size() > 100 && level < 10)
         {
-            node.splitDim = dim;
+            node.split.dim = dim;
 
-            // Absolute position in the dimension of the split
-            node.splitDistance = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
+            // We split at the center of the parent AABB
+            node.split.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
 
-            AABB leftAABB = aabb;
-            leftAABB.max[dim] = node.splitDistance;
+            AABB nearAABB = aabb;
+            nearAABB.max[dim] = node.split.p;
 
-            AABB rightAABB = aabb;
-            rightAABB.min[dim] = leftAABB.max[dim];
+            AABB farAABB = aabb;
+            farAABB.min[dim] = nearAABB.max[dim];
 
-            std::vector<Point> leftPoints, rightPoints;
-
-            for (const Point& p: points)
-            {
-                if (leftAABB.inside(p))
-                {
-                    leftPoints.push_back(p);
-                }
-                else
-                {
-                    rightPoints.push_back(p);
-                }
-            }
+            auto [near, far] = split(mesh, node.split);
 
             const int nextDim = (dim + 1) % 3;
 
-            node.right = std::make_unique<Node>();
-            stack.push(SplitStack{nextDim, std::move(rightPoints), node.right.get(), rightAABB});
+            node.far = std::make_unique<Node>();
+            stack.push(SplitStack{nextDim, std::move(far), node.far.get(), farAABB, level + 1});
 
-            node.left = std::make_unique<Node>();
-            stack.push(SplitStack{nextDim, std::move(leftPoints), node.left.get(), leftAABB});
+            node.near = std::make_unique<Node>();
+            stack.push(SplitStack{nextDim, std::move(near), node.near.get(), nearAABB, level + 1});
         }
         else
         {
             // Leaf
-            node.points = std::move(points);
+            node.mesh = std::move(mesh);
         }
     }
 }
 
-KDTree::Point KDTree::computeNearestNeighbor(const KDTree::Point& pos) const
+
+KDTree::NPQueryRet KDTree::findNearestPointOnMesh(const Point& pos) const
 {
-    // Are we left or right?
+    // Are we near or far?
+    NPQueryRet ret{};
 
-    const Node *node = m_root.get();
-    AABB aabb = m_rootAABB;
+    float currentDist = FLT_MAX;
 
-    float dist = FLT_MAX;
-    Point res;
-    searchRecursive(pos, m_root.get(), dist, res);
+    searchRecursive(pos, m_root.get(), currentDist, ret.id, ret.point);
 
-    return res;
+    return ret;
 }
 
-void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, Point& currentNeighbor) const
+void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, Triangle::ID& currentID,
+                             Point& currentPoint) const
 {
     // Are we on a leaf?
-    if (node->leaf())
+    if(node->leaf())
     {
         // We are on a leaf
         // Search brute force into the leaf node
-        for (const auto& other: node->points)
+        for(const auto& triangleID: node->mesh)
         {
-            const float d = other.distanceSquared(pos);
-            if (d < currentDist)
+            const auto nearestPtOnTriangle = findClosestPointOnTriangle(pos, m_mesh[triangleID]);
+            const float d = nearestPtOnTriangle.distanceSquared(pos);
+            if(d < currentDist)
             {
                 currentDist = d;
-                currentNeighbor = other;
+                currentID = triangleID;
+                currentPoint = nearestPtOnTriangle;
             }
         }
     }
@@ -172,31 +158,166 @@ void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, P
     {
         Node *front, *back;
 
-        // Are we on the left side?
-        if (pos[node->splitDim] < node->splitDistance)
+        // Which side I am?
+        switch(node->split.query(pos))
         {
-            // Pos is on the left side
-            front = node->left.get();
-            back = node->right.get();
-        }
-        else
-        {
-            // Pos is on the right side
-            front = node->right.get();
-            back = node->left.get();
+            case NEAR:
+                // Pos is on the near side
+                front = node->near.get();
+                back = node->far.get();
+                break;
+
+            case FAR:
+                // Pos is on the far side
+                front = node->far.get();
+                back = node->near.get();
+                break;
         }
 
-        searchRecursive(pos, front, currentDist, currentNeighbor);
+        searchRecursive(pos, front, currentDist, currentID, currentPoint);
 
         // If the current closest point is closer than the closest point of the back face, no need to search in the back
         // face because it will be always further.
-        // If not, we save half of the time for the current node
-        const float backDist = fabsf(node->splitDistance - pos[node->splitDim]);
-        // Do not forget all distances all squared
-        if (backDist * backDist <= currentDist)
+        // If so, we save half of the time for the current node
+        const float backDist = fabsf(node->split.p - pos[node->split.dim]);
+        // Do not forget currentDist is squared
+        if(backDist * backDist <= currentDist)
         {
             // If it can be closer, search also in this node
-            searchRecursive(pos, back, currentDist, currentNeighbor);
+            searchRecursive(pos, back, currentDist, currentID, currentPoint);
         }
     }
+}
+
+std::pair<KDTree::MeshAsID, KDTree::MeshAsID> KDTree::split(const MeshAsID& mesh, const Line& axe)
+{
+    MeshAsID parts[2];
+
+    // Iterate all triangles,
+    // We can't split them as they can belong to both sides
+    for(const auto& triangleID : mesh)
+    {
+        const auto& triangle = m_mesh[triangleID];
+
+        // If all points of the triangle are on one side, the triangle is not colliding with the other side (because
+        // triangle and AABB are convex shapes).
+
+        const auto side = axe.query(triangle.points[0]);
+        if(side == axe.query(triangle.points[1]) && side == axe.query(triangle.points[2]))
+        {
+            // All points are on the same side
+            // So the triangle is on one side
+            parts[side].push_back(triangleID);
+        }
+        else
+        {
+            // All points are not on the same side
+            // So the triangle is one both side
+            parts[NEAR].push_back(triangleID);
+            parts[FAR].push_back(triangleID);
+        }
+    }
+
+    return {parts[NEAR], parts[FAR]};
+}
+
+KDTree::Point KDTree::findClosestPointOnTriangle(const KDTree::Point& query, const KDTree::Triangle& triangle)
+{
+    // https://stackoverflow.com/a/32255438/5110937
+
+    using std::clamp;
+
+    auto edge0 = triangle.points[1] - triangle.points[0];
+    auto edge1 = triangle.points[2] - triangle.points[0];
+    auto v0 = triangle.points[0] - query;
+
+    float a = dot(edge0, edge0);
+    float b = dot(edge0, edge1);
+    float c = dot(edge1, edge1);
+    float d = dot(edge0, v0);
+    float e = dot(edge1, v0);
+
+    float det = a * c - b * b;
+    float s = b * e - c * d;
+    float t = b * d - a * e;
+
+    if(s + t < det)
+    {
+        if(s < 0.f)
+        {
+            if(t < 0.f)
+            {
+                if(d < 0.f)
+                {
+                    s = clamp(-d / a, 0.f, 1.f);
+                    t = 0.f;
+                }
+                else
+                {
+                    s = 0.f;
+                    t = clamp(-e / c, 0.f, 1.f);
+                }
+            }
+            else
+            {
+                s = 0.f;
+                t = clamp(-e / c, 0.f, 1.f);
+            }
+        }
+        else if(t < 0.f)
+        {
+            s = clamp(-d / a, 0.f, 1.f);
+            t = 0.f;
+        }
+        else
+        {
+            float invDet = 1.f / det;
+            s *= invDet;
+            t *= invDet;
+        }
+    }
+    else
+    {
+        if(s < 0.f)
+        {
+            float tmp0 = b + d;
+            float tmp1 = c + e;
+            if(tmp1 > tmp0)
+            {
+                float numer = tmp1 - tmp0;
+                float denom = a - 2 * b + c;
+                s = clamp(numer / denom, 0.f, 1.f);
+                t = 1 - s;
+            }
+            else
+            {
+                t = clamp(-e / c, 0.f, 1.f);
+                s = 0.f;
+            }
+        }
+        else if(t < 0.f)
+        {
+            if(a + d > b + e)
+            {
+                float numer = c + e - b - d;
+                float denom = a - 2 * b + c;
+                s = clamp(numer / denom, 0.f, 1.f);
+                t = 1 - s;
+            }
+            else
+            {
+                s = clamp(-e / c, 0.f, 1.f);
+                t = 0.f;
+            }
+        }
+        else
+        {
+            float numer = c + e - b - d;
+            float denom = a - 2 * b + c;
+            s = clamp(numer / denom, 0.f, 1.f);
+            t = 1.f - s;
+        }
+    }
+
+    return triangle.points[0] + edge0 * s + edge1 * t;
 }

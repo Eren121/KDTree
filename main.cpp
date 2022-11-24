@@ -5,17 +5,21 @@
 #include <chrono>
 #include <cfloat>
 
-class Timer {
+class Timer
+{
 public:
     Timer(const std::string& title) : title_(title), beg_(clock_::now()) {}
-    ~Timer() {
+
+    ~Timer()
+    {
         std::cout << title_ << " elapsed: " << elapsed() << "s" << std::endl;
     }
 
     void reset() { beg_ = clock_::now(); }
 
-    double elapsed() const {
-        return std::chrono::duration_cast<second_> (clock_::now() - beg_).count();
+    double elapsed() const
+    {
+        return std::chrono::duration_cast<second_>(clock_::now() - beg_).count();
     }
 
 private:
@@ -36,7 +40,8 @@ std::vector<KDTree::Point> randomPoints(int size, float bounds = 10.0f)
     {
         KDTree::Point point;
 
-        for(int dim = 0; dim < 3; dim++) {
+        for(int dim = 0; dim < 3; dim++)
+        {
             point[dim] = dist(engine);
         }
 
@@ -46,23 +51,37 @@ std::vector<KDTree::Point> randomPoints(int size, float bounds = 10.0f)
     return points;
 }
 
-int main()
+KDTree::Mesh randomTriangles(int size, float bounds = 10.0f)
 {
-    auto points = randomPoints(1'000'000);
-    for(int i = 0; i < points.size(); i++) {
-        auto& point = points[i];
+    KDTree::Mesh ret;
+
+    auto vertices = randomPoints(size * 3, bounds);
+
+    for(int i = 0; i < vertices.size() / 3; i++)
+    {
+        ret.emplace_back(
+            vertices[i * 3 + 0],
+            vertices[i * 3 + 1],
+            vertices[i * 3 + 2]
+        );
     }
 
-    auto aabb = KDTree::computeBoundingBox(points);
+    return ret;
+}
+
+int main()
+{
+    const auto mesh = randomTriangles(500'000);
+    const auto aabb = KDTree::computeBoundingBox(mesh);
 
     KDTree kdtree;
 
     {
         Timer timer("KDTree build");
-        kdtree = KDTree(points);
+        kdtree = KDTree(mesh);
     }
     {
-        const int N = 1'000;
+        const int N = 100;
         auto testPts = randomPoints(N, 10.0f);
 
         std::vector<KDTree::Point> resKD(N), resBrute(N);
@@ -70,34 +89,39 @@ int main()
         {
             Timer timer("KDTree");
 
-            for(int i = 0; i < testPts.size(); i++) {
-                resKD[i] = kdtree.computeNearestNeighbor(testPts[i]);
+            for(int i = 0; i < testPts.size(); i++)
+            {
+                auto ret = kdtree.findNearestPointOnMesh(testPts[i]);
+                resKD[i] = ret.point;
             }
         }
         {
             Timer timer("Bruteforce");
 
-            for(int i = 0; i < testPts.size(); i++) {
+            for(int i = 0; i < testPts.size(); i++)
+            {
 
                 const auto& test = testPts[i];
 
-                // Brute force
-                KDTree::Point cur;
                 float curDist = FLT_MAX;
-                for(const auto& brute : points) {
-                    if(brute.distanceSquared(test) < curDist) {
-                        curDist = brute.distanceSquared(test);
-                        cur = brute;
+                for(int id = 0; id < mesh.size(); id++)
+                {
+                    const auto& triangle = mesh[id];
+
+                    const auto nearest = KDTree::findClosestPointOnTriangle(test, triangle);
+                    if(nearest.distanceSquared(test) < curDist)
+                    {
+                        curDist = nearest.distanceSquared(test);
+                        resBrute[i] = nearest;
                     }
                 }
-
-                resBrute[i] = cur;
             }
         }
 
         {
             float delta = 0.0f;
-            for(int i = 0; i < N; i++) {
+            for(int i = 0; i < N; i++)
+            {
                 delta += resKD[i].x - resBrute[i].x;
                 delta += resKD[i].y - resBrute[i].y;
                 delta += resKD[i].z - resBrute[i].z;
