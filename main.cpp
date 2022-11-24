@@ -2,8 +2,8 @@
 #include <vector>
 #include <random>
 #include "KDTree.h"
-#include "viewer.h"
 #include <chrono>
+#include <cfloat>
 
 class Timer {
 public:
