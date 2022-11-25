@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <stack>
+#include <ostream>
 
 /**
  * @brief K-d tree of 3D triangles.
@@ -219,6 +220,24 @@ public:
     [[nodiscard]] const auto& getMesh() const { return m_mesh; }
     [[nodiscard]] const auto& getBounds() const { return m_rootAABB; }
 
+    /**
+     * @return
+     *      The maximum number of nodes.
+     *      It depend on the max level value.
+     *      The number of non-empty nodes stored is probably way less.
+     */
+    [[nodiscard]] int getMaxNodesCount() const
+    {
+        // Maximum number of node in a perfect binary tree where the deepest level is m_maxLevel (root is at level 0)
+        return (1 << (m_maxLevel + 1)) - 1;
+    }
+
+    template<typename T>
+    T& summarize(T& out)
+    {
+        out << "Max nodes count: " << getMaxNodesCount() << std::endl;
+    }
+
 private:
     /**
      * @brief Represent each node of the k-d tree.
@@ -227,6 +246,10 @@ private:
     {
         /**
          * @brief Use compact representation to save memory.
+         *
+         * We consider zero-initialization should be the empty node (because its simpler to treat).
+         * So the fields should be set accordingly.
+         * It can be nasty bugs if the values are not initialized.
          */
         struct Header
         {
@@ -234,14 +257,14 @@ private:
             // and they are aligned by their underlying type,
             // so if we declare them "unsigned char" Header will be 4 bytes, wasting 3.
 
-            unsigned char leaf : 1; ///< 1 if the node is a leaf, 0 otherwise
-            unsigned char dim : 2; ///< Dimension of the split, in [0-3]
+            unsigned char hasChildren : 1; ///< 0 if the node is a leaf, 1 otherwise (zero-initialization is empty node)
+            unsigned char dim : 2; ///< Dimension of the split, in [0;3)
         };
 
         // Check optimal size
         static_assert(sizeof(Header) == 1);
 
-        Header header;
+        Header header{}; ///< Header, zero-initialized by default.
         float p; ///< Line of the split
 
         /**
@@ -256,12 +279,6 @@ private:
             return ret;
         }
 
-        /**
-         * @brief
-         *      Children. Both of them or neither of them are null.
-         */
-        std::unique_ptr<Node> near, far;
-
         MeshAsID mesh;
 
         /**
@@ -270,30 +287,22 @@ private:
         bool leaf() const
         {
             // left or right it doesn't matter
-            return near == nullptr;
+            return !header.hasChildren;
         }
     };
 
-    /**
-     * We can't use the OS stack, because it is too small for our needs in recursion.
-     * Treat the members as the parameters of the recursive function.
-     */
-    struct SplitStack
-    {
-        int dim; ///< The dimension to the split
-        MeshAsID mesh; ///< The list of remaining candidates for this area, all inside aabb.
-        Node* node; ///< The node, allocated, to fill
-        AABB aabb; ///< The bounding box of the node.
-        int level;
-    };
+    using NodeID = int;
 
 private:
     void init();
 
-    void searchRecursive(const Point& pos, Node* node, float& currentDist, Triangle::ID& currentID, Point& currentPoint) const;
+    void searchRecursive(const Point& pos, NodeID nodeID, float& currentDist, Triangle::ID& currentID, Point& currentPoint) const;
+
+    Node& getRoot() { return m_nodes[0]; }
 
 private:
     std::vector<Triangle> m_mesh;
     AABB m_rootAABB;
-    std::unique_ptr<Node> m_root;
+    std::vector<Node> m_nodes;
+    int m_maxLevel;
 };

@@ -43,13 +43,28 @@ KDTree::AABB KDTree::computeBoundingBox(const Mesh& mesh)
 KDTree::KDTree(Mesh mesh)
     : m_mesh(std::move(mesh)),
       m_rootAABB(computeBoundingBox(m_mesh)),
-      m_root(std::make_unique<Node>())
+      m_maxLevel(15)
 {
     init();
 }
 
 void KDTree::init()
 {
+    // We can't use recursive functions, because the OS stack is too small for our needs in recursion.
+    // Treat the members as the parameters of the recursive function.
+    struct SplitStack
+    {
+        int dim; ///< The dimension to the split
+        MeshAsID mesh; ///< The list of remaining candidates for this area, all inside aabb.
+        NodeID nodeID; ///< The node, allocated, to fill
+        AABB aabb; ///< The bounding box of the node.
+        int level; ///< Current level of depth. Used for termination condition.
+    };
+
+    // Allocate the maximum number of node
+    // Also initialize to zero
+    m_nodes.resize(getMaxNodesCount());
+
     std::stack<SplitStack> stack;
 
     {
@@ -62,7 +77,14 @@ void KDTree::init()
             candidates.push_back(i);
         }
 
-        stack.push(SplitStack{0, std::move(candidates), m_root.get(), m_rootAABB, 0});
+        SplitStack top;
+        top.dim = 0;
+        top.mesh = std::move(candidates);
+        top.level = 0;
+        top.aabb = m_rootAABB;
+        top.nodeID = 0;
+
+        stack.push(std::move(top));
     }
 
     // Split recursively in x, y, z, x, y, z...
@@ -98,20 +120,20 @@ void KDTree::init()
                 #pragma omp task default(none) firstprivate(arg) shared(stack)
                 {
                     auto mesh = std::move(arg.mesh);
-                    Node& node = *arg.node;
+                    const NodeID nodeID = arg.nodeID;
+                    Node& node = m_nodes[arg.nodeID];
                     const int dim = arg.dim;
                     const AABB aabb = arg.aabb;
                     const int level = arg.level;
-
-                    constexpr int MAX_LEVEL = 5;
 
                     // Stop condition
                     // FOR TRIANGLES: it's not guaranteed we can have less a given number of triangles, so we always should
                     // Stop on a recursive condition
                     // We can also stop it if the next split don't split enough, let's say more than 50% of triangles are on both sides
-                    if(mesh.size() > 100 && level < MAX_LEVEL)
+                    if(mesh.size() > 100 && level < m_maxLevel)
                     {
                         node.header.dim = dim;
+                        node.header.hasChildren = true;
 
                         // We split at the center of the parent AABB
                         node.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
@@ -126,18 +148,20 @@ void KDTree::init()
 
                         const int nextDim = (dim + 1) % 3;
 
+                        NodeID childrenIDs[2];
+                        childrenIDs[NEAR] = 2 * nodeID + 1; // "Left child" (near)
+                        childrenIDs[FAR] = 2 * nodeID + 2; // "Right child" (far)
+
                         #pragma omp critical
                         {
-                            node.far = std::make_unique<Node>();
-                            stack.push(SplitStack{nextDim, std::move(far), node.far.get(), farAABB, level + 1});
-
-                            node.near = std::make_unique<Node>();
-                            stack.push(SplitStack{nextDim, std::move(near), node.near.get(), nearAABB, level + 1});
+                            stack.push(SplitStack{nextDim, std::move(far), childrenIDs[FAR], farAABB, level + 1});
+                            stack.push(SplitStack{nextDim, std::move(near), childrenIDs[NEAR], nearAABB, level + 1});
                         }
                     }
                     else
                     {
-                        // Leaf
+                        // Leaf node
+                        // Store the final mesh in the leaf node
                         node.mesh = std::move(mesh);
                     }
                 }
@@ -156,20 +180,22 @@ KDTree::NPQueryRet KDTree::findNearestPointOnMesh(const Point& pos) const
 
     float currentDist = FLT_MAX;
 
-    searchRecursive(pos, m_root.get(), currentDist, ret.id, ret.point);
+    searchRecursive(pos, 0, currentDist, ret.id, ret.point);
 
     return ret;
 }
 
-void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, Triangle::ID& currentID,
+void KDTree::searchRecursive(const Point& pos, NodeID nodeID, float& currentDist, Triangle::ID& currentID,
                              Point& currentPoint) const
 {
+    const Node& node = m_nodes[nodeID];
+
     // Are we on a leaf?
-    if(node->leaf())
+    if(node.leaf())
     {
         // We are on a leaf
         // Search brute force into the leaf node
-        for(const auto& triangleID: node->mesh)
+        for(const auto& triangleID: node.mesh)
         {
             const auto nearestPtOnTriangle = findClosestPointOnTriangle(pos, m_mesh[triangleID]);
             const float d = nearestPtOnTriangle.distanceSquared(pos);
@@ -183,22 +209,26 @@ void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, T
     }
     else
     {
-        Node *front, *back;
-        const Line& split = node->line();
+        NodeID front, back;
+        const Line& split = node.line();
+
+        NodeID childrenIDs[2];
+        childrenIDs[NEAR] = 2 * nodeID + 1; // "Left child" (near)
+        childrenIDs[FAR] = 2 * nodeID + 2; // "Right child" (far)
 
         // Which side I am?
         switch(split.query(pos))
         {
             case NEAR:
                 // Pos is on the near side
-                front = node->near.get();
-                back = node->far.get();
+                front = childrenIDs[NEAR];
+                back = childrenIDs[FAR];
                 break;
 
             case FAR:
                 // Pos is on the far side
-                front = node->far.get();
-                back = node->near.get();
+                front = childrenIDs[FAR];
+                back = childrenIDs[NEAR];
                 break;
         }
 
@@ -220,10 +250,10 @@ void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, T
 std::pair<KDTree::MeshAsID, KDTree::MeshAsID> KDTree::split(const MeshAsID& mesh, const Line& axe)
 {
     MeshAsID parts[2];
-    
+
     // Iterate all triangles,
     // We can't split them as they can belong to both sides
-    for(const auto& triangleID : mesh)
+    for(const auto& triangleID: mesh)
     {
         const auto& triangle = m_mesh[triangleID];
 
