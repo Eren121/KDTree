@@ -226,12 +226,41 @@ private:
     struct Node
     {
         /**
+         * @brief Use compact representation to save memory.
+         */
+        struct Header
+        {
+            // All bitfields should have the same type to be on the same byte,
+            // and they are aligned by their underlying type,
+            // so if we declare them "unsigned char" Header will be 4 bytes, wasting 3.
+
+            unsigned char leaf : 1; ///< 1 if the node is a leaf, 0 otherwise
+            unsigned char dim : 2; ///< Dimension of the split, in [0-3]
+        };
+
+        // Check optimal size
+        static_assert(sizeof(Header) == 1);
+
+        Header header;
+        float p; ///< Line of the split
+
+        /**
+         * @return The split line. We don't store it directly to permit a compact representation.
+         */
+        Line line() const
+        {
+            Line ret;
+            ret.dim = header.dim;
+            ret.p = p;
+
+            return ret;
+        }
+
+        /**
          * @brief
          *      Children. Both of them or neither of them are null.
          */
         std::unique_ptr<Node> near, far;
-
-        Line split;
 
         MeshAsID mesh;
 

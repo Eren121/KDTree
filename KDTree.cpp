@@ -111,18 +111,18 @@ void KDTree::init()
                     // We can also stop it if the next split don't split enough, let's say more than 50% of triangles are on both sides
                     if(mesh.size() > 100 && level < MAX_LEVEL)
                     {
-                        node.split.dim = dim;
+                        node.header.dim = dim;
 
                         // We split at the center of the parent AABB
-                        node.split.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
+                        node.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
 
                         AABB nearAABB = aabb;
-                        nearAABB.max[dim] = node.split.p;
+                        nearAABB.max[dim] = node.p;
 
                         AABB farAABB = aabb;
                         farAABB.min[dim] = nearAABB.max[dim];
 
-                        auto [near, far] = split(mesh, node.split);
+                        auto [near, far] = split(mesh, node.line());
 
                         const int nextDim = (dim + 1) % 3;
 
@@ -184,9 +184,10 @@ void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, T
     else
     {
         Node *front, *back;
+        const Line& split = node->line();
 
         // Which side I am?
-        switch(node->split.query(pos))
+        switch(split.query(pos))
         {
             case NEAR:
                 // Pos is on the near side
@@ -206,7 +207,7 @@ void KDTree::searchRecursive(const Point& pos, Node *node, float& currentDist, T
         // If the current closest point is closer than the closest point of the back face, no need to search in the back
         // face because it will be always further.
         // If so, we save half of the time for the current node
-        const float backDist = fabsf(node->split.p - pos[node->split.dim]);
+        const float backDist = fabsf(split.p - pos[split.dim]);
         // Do not forget currentDist is squared
         if(backDist * backDist <= currentDist)
         {
