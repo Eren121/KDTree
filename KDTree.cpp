@@ -65,7 +65,9 @@ void KDTree::init()
     // Also initialize to zero
     m_nodes.resize(getMaxNodesCount());
 
-    std::stack<SplitStack> stack;
+    // We use a vector just because we need the clear() method which is more effecient
+    // than a pop() loop, or '= {}' because it may reallocate memory
+    std::vector<SplitStack> stack;
 
     {
         // Initial candidates is the entire mesh
@@ -84,7 +86,7 @@ void KDTree::init()
         top.aabb = m_rootAABB;
         top.nodeID = 0;
 
-        stack.push(std::move(top));
+        stack.push_back(std::move(top));
     }
 
     // Split recursively in x, y, z, x, y, z...
@@ -101,79 +103,81 @@ void KDTree::init()
 
     #pragma omp parallel default(none) shared(stack, std::cout)
     {
+        // Generator thread current level
+        int generatorLevel = 0;
+
         #pragma omp single
         while(!stack.empty())
         {
             // Queue the stack tasks at once, then wait all
-            std::cout << "Spawn " << stack.size() << " tasks" << std::endl;
+            std::cout << "Spawn " << stack.size() << " tasks for level " << generatorLevel  << std::endl;
 
-            while(!stack.empty())
+            // Run all tasks
+            // First get all tasks to avoid a race condition on the stack,
+            // because a task may push() to the stack, possibly immediately
+            auto tasks = std::move(stack);
+            stack.clear();
+
+            #pragma omp taskloop default(none) shared(tasks, stack)
+            for(int i = 0; i < tasks.size(); i++)
             {
-                SplitStack arg;
+                auto& arg = tasks[i];
+                auto mesh = std::move(arg.mesh);
+                const NodeID nodeID = arg.nodeID;
+                Node& node = m_nodes[arg.nodeID];
+                const int dim = arg.dim;
+                const AABB aabb = arg.aabb;
+                const int level = arg.level;
 
-                #pragma omp critical
+                // Stop condition
+                // FOR TRIANGLES: it's not guaranteed we can have less a given number of triangles, so we always should
+                // Stop on a recursive condition
+                // We can also stop it if the next split don't split enough, let's say more than 50% of triangles are on both sides
+                if(mesh.size() > 100 && level < m_maxLevel)
                 {
-                    arg = std::move(stack.top());
-                    stack.pop();
+                    node.header.dim = dim;
+                    node.header.hasChildren = true;
+
+                    // We split at the center of the parent AABB
+                    node.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
+
+                    AABB nearAABB = aabb;
+                    nearAABB.max[dim] = node.p;
+
+                    AABB farAABB = aabb;
+                    farAABB.min[dim] = nearAABB.max[dim];
+
+                    auto [near, far] = split(mesh, node.line());
+
+                    const int nextDim = (dim + 1) % 3;
+
+                    NodeID childrenIDs[2];
+                    childrenIDs[NEAR] = 2 * nodeID + 1; // "Left child" (near)
+                    childrenIDs[FAR] = 2 * nodeID + 2; // "Right child" (far)
+
+                    #pragma omp critical
+                    {
+                        stack.push_back(SplitStack{nextDim, std::move(far), childrenIDs[FAR], farAABB, level + 1});
+                        stack.push_back(SplitStack{nextDim, std::move(near), childrenIDs[NEAR], nearAABB, level + 1});
+                    }
                 }
-
-                #pragma omp task default(none) firstprivate(arg) shared(stack)
+                else
                 {
-                    auto mesh = std::move(arg.mesh);
-                    const NodeID nodeID = arg.nodeID;
-                    Node& node = m_nodes[arg.nodeID];
-                    const int dim = arg.dim;
-                    const AABB aabb = arg.aabb;
-                    const int level = arg.level;
+                    // Leaf node
+                    // Store the final mesh in the leaf node
+                    node.mesh = std::move(mesh);
 
-                    // Stop condition
-                    // FOR TRIANGLES: it's not guaranteed we can have less a given number of triangles, so we always should
-                    // Stop on a recursive condition
-                    // We can also stop it if the next split don't split enough, let's say more than 50% of triangles are on both sides
-                    if(mesh.size() > 100 && level < m_maxLevel)
-                    {
-                        node.header.dim = dim;
-                        node.header.hasChildren = true;
+                    #pragma omp atomic
+                    m_totalLeafNodes++;
 
-                        // We split at the center of the parent AABB
-                        node.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
-
-                        AABB nearAABB = aabb;
-                        nearAABB.max[dim] = node.p;
-
-                        AABB farAABB = aabb;
-                        farAABB.min[dim] = nearAABB.max[dim];
-
-                        auto [near, far] = split(mesh, node.line());
-
-                        const int nextDim = (dim + 1) % 3;
-
-                        NodeID childrenIDs[2];
-                        childrenIDs[NEAR] = 2 * nodeID + 1; // "Left child" (near)
-                        childrenIDs[FAR] = 2 * nodeID + 2; // "Right child" (far)
-
-                        #pragma omp critical
-                        {
-                            stack.push(SplitStack{nextDim, std::move(far), childrenIDs[FAR], farAABB, level + 1});
-                            stack.push(SplitStack{nextDim, std::move(near), childrenIDs[NEAR], nearAABB, level + 1});
-                        }
-                    }
-                    else
-                    {
-                        // Leaf node
-                        // Store the final mesh in the leaf node
-                        node.mesh = std::move(mesh);
-
-                        #pragma omp atomic
-                        m_totalLeafNodes++;
-
-                        #pragma omp atomic
-                        m_totalLeafTriangles += node.mesh.size();
-                    }
+                    #pragma omp atomic
+                    m_totalLeafTriangles += node.mesh.size();
                 }
             }
 
             #pragma omp taskwait
+
+            generatorLevel++;
         }
     }
 }
