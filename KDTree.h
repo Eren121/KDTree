@@ -89,6 +89,7 @@ public:
         using ID = int;
         Point points[3];
 
+        Triangle() = default;
         Triangle(const Point& a, const Point& b, const Point& c) : points{a, b, c} {}
     };
 
@@ -214,6 +215,9 @@ public:
      * @return A pair (point, id) where id is the ID of the triangle.
      */
     [[nodiscard]] NPQueryRet findNearestPointOnMesh(const Point& pos) const;
+
+    [[nodiscard]] const auto& getMesh() const { return m_mesh; }
+    [[nodiscard]] const auto& getBounds() const { return m_rootAABB; }
 
 private:
     /**
