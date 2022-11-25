@@ -107,8 +107,9 @@ int main(int argc, char *argv[])
             Timer timer("KDTree build");
             kdtree = KDTree(std::move(mesh));
         }
-
     }
+
+    kdtree.summarize(std::cout);
 
     UT_BoundingBox bounds;
     gdp.getCachedBounds(bounds);

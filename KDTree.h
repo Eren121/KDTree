@@ -235,7 +235,14 @@ public:
     template<typename T>
     T& summarize(T& out)
     {
-        out << "Max nodes count: " << getMaxNodesCount() << std::endl;
+        out << "KDTree summary:" << std::endl;
+        out << "    Max level: " << m_maxLevel << std::endl;
+        out << "    Max nodes: " << getMaxNodesCount() << std::endl;
+        out << "    Non-null nodes: " << (m_totalLeafNodes * 2 - 1) << std::endl; // Handshaking Lemma
+        out << "    Leaves nodes: " << m_totalLeafNodes << std::endl;
+        out << "    Triangles in nodes: " << m_totalLeafTriangles << std::endl;
+
+        return out;
     }
 
 private:
@@ -305,4 +312,6 @@ private:
     AABB m_rootAABB;
     std::vector<Node> m_nodes;
     int m_maxLevel;
+    int m_totalLeafNodes{0}; ///< Total count of leaves
+    int m_totalLeafTriangles{0}; ///< Total count of triangles stored in all leaves
 };

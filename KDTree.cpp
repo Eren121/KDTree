@@ -163,6 +163,12 @@ void KDTree::init()
                         // Leaf node
                         // Store the final mesh in the leaf node
                         node.mesh = std::move(mesh);
+
+                        #pragma omp atomic
+                        m_totalLeafNodes++;
+
+                        #pragma omp atomic
+                        m_totalLeafTriangles += node.mesh.size();
                     }
                 }
             }

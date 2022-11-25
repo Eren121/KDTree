@@ -19,7 +19,6 @@ int main()
         kdtree = KDTree(mesh);
     }
     {
-
         const int N = 100;
         auto testPts = randomPoints(N, 10.0f);
 
