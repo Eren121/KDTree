@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(KDTree)
+project(KDTree LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -16,5 +16,8 @@ if(Houdini_FOUND)
     add_executable(KDTree-Houdini-Test test-houdini.cpp)
     target_link_libraries(KDTree-Houdini-Test Houdini KDTree)
     target_link_libraries(KDTree-Houdini-Test Houdini tbb)
+    target_compile_definitions(KDTree PUBLIC KDTREE_TRACE=1)
     houdini_configure_target(KDTree-Houdini-Test)
 endif()
+
+include_directories(${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})

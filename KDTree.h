@@ -9,6 +9,7 @@
 #include <cmath>
 #include <stack>
 #include <ostream>
+#include <thrust/device_vector.h>
 
 /**
  * @brief K-d tree of 3D triangles.
@@ -92,11 +93,6 @@ public:
 
         Triangle() = default;
         Triangle(const Point& a, const Point& b, const Point& c) : points{a, b, c} {}
-    };
-
-    struct TriangleWithID : Triangle
-    {
-        ID id;
     };
 
     using Mesh = std::vector<Triangle>;
@@ -188,15 +184,25 @@ public:
     }
 
     /**
-     * @brief Split a set of triangles in left and right sets.
+     * @brief Split a set of triangles in near and far sets.
      *
-     * @param mesh The mesh to init.
-     * @param axe The position of the init axe.
-     * @param dim The dimension of the init axe.
+     * @param mesh The mesh to split.
+     * @param meshSize The count of triangles in the mesh.
+     * @param axe The position of the split straight line.
+     * @param outputsOrig
+     *      Where to store the split mesh.
+     *      outputs[NEAR] will store the near mesh.
+     *      output[FAR] will store the far mesh.
+     *      Some triangles can be stored on both sides.
+     *      The array must be preallocated and have enough place.
+     *      That means, each output should have at least the size of the input mesh because
+     *      we don't know and maybe all triangles will belong to both children.
      *
-     * @return A pair (left, right) of sets. Some triangles may be contained by both.
+     * @param outputSizes
+     *      outputSizes[NEAR] will store the size of the near output mesh.
+     *      outputSizes[NEAR] will store the size of the far output mesh.
      */
-    std::pair<MeshAsID, MeshAsID> split(const MeshAsID& mesh, const Line& axe);
+    void split(const Triangle::ID *mesh, int meshSize, const Line& axe, Triangle::ID* const outputsOrig[2], int outputSizes[2]);
 
 public:
     KDTree() = default;
@@ -239,8 +245,9 @@ public:
         out << "    Max level: " << m_maxLevel << std::endl;
         out << "    Max nodes: " << getMaxNodesCount() << std::endl;
         out << "    Non-null nodes: " << (m_totalLeafNodes * 2 - 1) << std::endl; // Handshaking Lemma
-        out << "    Leaves nodes: " << m_totalLeafNodes << std::endl;
-        out << "    Triangles in nodes: " << m_totalLeafTriangles << std::endl;
+        out << "    Leaves: " << m_totalLeafNodes << std::endl;
+        out << "    Triangles in leaves: " << m_leavesBuffer.size()
+            << " (" << m_leavesBuffer.size() * sizeof(Triangle::ID) << " bytes)" << std::endl;
 
         return out;
     }
@@ -286,7 +293,8 @@ private:
             return ret;
         }
 
-        MeshAsID mesh;
+        Triangle::ID* mesh;
+        int meshSize;
 
         /**
          * @return true if this node is a leaf node (it has no children).
@@ -308,10 +316,42 @@ private:
     Node& getRoot() { return m_nodes[0]; }
 
 private:
-    std::vector<Triangle> m_mesh;
     AABB m_rootAABB;
+    std::vector<Triangle> m_mesh;
     std::vector<Node> m_nodes;
+    std::vector<Triangle::ID> m_leavesBuffer; ///< Each part of the array stores one leave
     int m_maxLevel;
     int m_totalLeafNodes{0}; ///< Total count of leaves
-    int m_totalLeafTriangles{0}; ///< Total count of triangles stored in all leaves
+
+    // CUDA buffers
+    // Tehy are built at the end of the KDTree initialization
+    thrust::device_vector<Triangle> m_d_mesh;
+    thrust::device_vector<Node> m_d_nodes;
+    thrust::device_vector<Triangle::ID> m_d_leavesBuffer;
+
+    /**
+     * Contains pointers to device memory.
+     * Can be copied to CUDA kernel to access the KDTree.
+     */
+    class OnDevice
+    {
+        /**
+         * Like `std::span` class on device.
+         * There are no `thrust::span` class for now.
+         */
+        template<typename T>
+        struct Span
+        {
+            T* data;
+            size_t size;
+        };
+
+    private:
+        AABB m_rootAABB;
+        Span<Triangle> m_mesh;
+        Span<Node> m_nodes;
+        Span<Triangle::ID> m_leavesBuffer;
+        int m_maxLevel;
+        int m_totalLeafNodes;
+    };
 };

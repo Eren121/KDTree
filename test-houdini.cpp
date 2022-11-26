@@ -21,7 +21,7 @@ long getRayIntersectPrimitive(GU_RayIntersect& ray, UT_Vector3F p, float& u, flo
     if(!mininfo.prim)
     {
         std::cout << "error" << std::endl;
-        return -1;
+        exit(1);
     }
 
     //Get the Primitive ID
@@ -61,8 +61,12 @@ int main(int argc, char *argv[])
 {
     std::string home = std::getenv("HOME");
 
-    //const std::string path = home + "/Documents/LSTS/DamBreak/dambreak_fluidSim_SlowTImescal0_25_100.bgeo";
-    const std::string path = home + "/models/res1.bgeo";
+    const std::string path = home +
+        //"/Documents/LSTS/DamBreak/dambreak_fluidSim_SlowTImescal0_25_100.bgeo";
+        //"/models/res1.bgeo"
+        //"/Downloads/sphere_remesh_uv_240.obj"
+        "/Downloads/bs_smile.obj"
+    ;
 
     GU_Detail gdp;
 

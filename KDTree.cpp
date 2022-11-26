@@ -5,6 +5,18 @@
 #include <iostream>
 #include <cmath>
 #include <utility>
+#include <numeric>
+
+namespace
+{
+    template<typename... T>
+    void trace(T&&... args)
+    {
+#if KDTREE_TRACE
+        ((std::cout << args << " "), ...) << std::endl;
+#endif
+    }
+}
 
 KDTree::AABB KDTree::computeBoundingBox(const Mesh& mesh)
 {
@@ -41,8 +53,8 @@ KDTree::AABB KDTree::computeBoundingBox(const Mesh& mesh)
 }
 
 KDTree::KDTree(Mesh mesh)
-    : m_mesh(std::move(mesh)),
-      m_rootAABB(computeBoundingBox(m_mesh)),
+    : m_rootAABB(computeBoundingBox(m_mesh)),
+      m_mesh(std::move(mesh)),
       m_maxLevel(15)
 {
     init();
@@ -50,44 +62,35 @@ KDTree::KDTree(Mesh mesh)
 
 void KDTree::init()
 {
+    const size_t bytesBuffer = 10'000'000; // 10MB
+
+    // Allocate the maximum possible size for the leaves node
+    // If it is outreached then undefined behaviour; pointers may be invalided on reallocation
+    // And leaves mesh points to garbage
+    m_leavesBuffer.reserve(bytesBuffer / sizeof(m_leavesBuffer[0]));
+
     // We can't use recursive functions, because the OS stack is too small for our needs in recursion.
     // Treat the members as the parameters of the recursive function.
-    struct SplitStack
+    // Also, we iterate BFS and not DFS
+    struct Task
     {
         int dim; ///< The dimension to the split
-        MeshAsID mesh; ///< The list of remaining candidates for this area, all inside aabb.
         NodeID nodeID; ///< The node, allocated, to fill
         AABB aabb; ///< The bounding box of the node.
         int level; ///< Current level of depth. Used for termination condition.
+        Triangle::ID *inputMesh; ///< Remaining candidates for this node
+        int inputMeshSize; ///< Count of input mesh for this node
+        Triangle::ID *outputMesh; ///< Preallocated output for this mesh split, of size x2 the count of triangles
     };
 
+
     // Allocate the maximum number of node
-    // Also initialize to zero
+    // Also initialize to zero (empty node)
     m_nodes.resize(getMaxNodesCount());
 
     // We use a vector just because we need the clear() method which is more effecient
     // than a pop() loop, or '= {}' because it may reallocate memory
-    std::vector<SplitStack> stack;
-
-    {
-        // Initial candidates is the entire mesh
-        MeshAsID candidates;
-        candidates.reserve(m_mesh.size());
-
-        for(int i = 0; i < m_mesh.size(); i++)
-        {
-            candidates.push_back(i);
-        }
-
-        SplitStack top;
-        top.dim = 0;
-        top.mesh = std::move(candidates);
-        top.level = 0;
-        top.aabb = m_rootAABB;
-        top.nodeID = 0;
-
-        stack.push_back(std::move(top));
-    }
+    std::vector<Task> stack;
 
     // Split recursively in x, y, z, x, y, z...
     // Split at the center
@@ -101,16 +104,56 @@ void KDTree::init()
     //                    <----------------->    <--------------->
     // splitDistance:        if left                 if right
 
-    #pragma omp parallel default(none) shared(stack, std::cout)
+    #pragma omp parallel default(none) shared(stack)
+    #pragma omp single
     {
-        // Generator thread current level
+        // Generator (master) thread current level
         int generatorLevel = 0;
 
-        #pragma omp single
+        // The temporary working buffer to store the triangles for the current level (input),
+        // And the next level (output)
+        // We don't know a reasonable upper bound of the size of the vectors, or a very high upper bounds impracticable
+        // to reserve: the level L has at maximum 2^L * mesh.size() triangles, which is very high for deep levels.
+        std::vector<Triangle::ID> inputTriangles;
+        std::vector<Triangle::ID> outputTriangles;
+
+        // To split the task children, allocate memory at each level only once globally for the triangles
+        // Each task has a unique array associated to it starting at task.inputMesh pointing in same
+        // memory inside inputTriangles.
+        // There is as well an output buffer mesh.outputMesh pointing inside an offset in outputTriangles.
+        // This temporary working "buffer" for the task is of size 2x the count of triangles of the task
+        // That means the working buffer will always have enough space to store the children triangles even
+        // if both have all the mesh (as a note, this case is very inefficient). We could optimize it and stop
+        // Recursion for example if more than X% of triangles are on both side.
+        // The working buffer is split in two contiguous array to store the children near and far triangles.
+        // There is no race condition on the input variable because each task may only access its own part of the array.
+        // There is also no race condition on the output because each task has its own part to the output array.
+
+        // At first, there is only one task (the root)
+        // And all the triangles are contained once in the root node
+        inputTriangles.resize(m_mesh.size());
+        std::iota(inputTriangles.begin(), inputTriangles.end(), 0); // Initial candidates is the entire mesh
+
+        // At the very most both near and far children of the root store all the mesh
+        outputTriangles.resize(inputTriangles.size() * 2);
+
+        {
+            // First task
+            stack.push_back({
+                .dim = 0,
+                .nodeID = 0,
+                .aabb = m_rootAABB,
+                .level = 0,
+                .inputMesh = &inputTriangles[0],
+                .inputMeshSize = static_cast<int>(inputTriangles.size()),
+                .outputMesh = &outputTriangles[0]
+            });
+        }
+
         while(!stack.empty())
         {
             // Queue the stack tasks at once, then wait all
-            std::cout << "Spawn " << stack.size() << " tasks for level " << generatorLevel  << std::endl;
+            trace("Spawn", stack.size(), "tasks for level", generatorLevel);
 
             // Run all tasks
             // First get all tasks to avoid a race condition on the stack,
@@ -118,36 +161,49 @@ void KDTree::init()
             auto tasks = std::move(stack);
             stack.clear();
 
-            #pragma omp taskloop default(none) shared(tasks, stack)
-            for(int i = 0; i < tasks.size(); i++)
+            // Total count of triangles outputs for the current level, which is also
+            // the total count of input triangles for the next level.
+            // Filled as things progress by the tasks (atomically to avoid race condition)
+            // Also permit to know where the offset should be for each task in the output.
+            int totalOutputTriangles = 0;
+
+            #pragma omp taskloop default(none) shared(tasks, stack, totalOutputTriangles)
+            for(int t = 0; t < tasks.size(); t++)
             {
-                auto& arg = tasks[i];
-                auto mesh = std::move(arg.mesh);
-                const NodeID nodeID = arg.nodeID;
-                Node& node = m_nodes[arg.nodeID];
-                const int dim = arg.dim;
-                const AABB aabb = arg.aabb;
-                const int level = arg.level;
+                auto& task = tasks[t];
+                const NodeID nodeID = task.nodeID;
+                Node& node = m_nodes[task.nodeID];
+                const int dim = task.dim;
+                const AABB aabb = task.aabb;
+                const int level = task.level;
 
                 // Stop condition
                 // FOR TRIANGLES: it's not guaranteed we can have less a given number of triangles, so we always should
-                // Stop on a recursive condition
-                // We can also stop it if the next split don't split enough, let's say more than 50% of triangles are on both sides
-                if(mesh.size() > 100 && level < m_maxLevel)
+                // Stop on a max. level
+                if(task.inputMeshSize > 100 && level < m_maxLevel)
                 {
+                    // Node must be split, split here
+
                     node.header.dim = dim;
                     node.header.hasChildren = true;
 
                     // We split at the center of the parent AABB
                     node.p = (aabb.max[dim] + aabb.min[dim]) / 2.0f;
 
-                    AABB nearAABB = aabb;
-                    nearAABB.max[dim] = node.p;
+                    AABB aabbs[2];
+                    aabbs[NEAR] = aabb;
+                    aabbs[NEAR].max[dim] = node.p;
+                    aabbs[FAR] = aabb;
+                    aabbs[FAR].min[dim] = aabbs[NEAR].max[dim];
 
-                    AABB farAABB = aabb;
-                    farAABB.min[dim] = nearAABB.max[dim];
+                    Triangle::ID *outputs[2];
+                    outputs[NEAR] = &task.outputMesh[0];
+                    outputs[FAR] = &task.outputMesh[task.inputMeshSize];
 
-                    auto [near, far] = split(mesh, node.line());
+                    int outputSizes[2];
+
+                    // COSTLY SPLIT in preallocated memory
+                    split(task.inputMesh, task.inputMeshSize, node.line(), outputs, outputSizes);
 
                     const int nextDim = (dim + 1) % 3;
 
@@ -157,25 +213,85 @@ void KDTree::init()
 
                     #pragma omp critical
                     {
-                        stack.push_back(SplitStack{nextDim, std::move(far), childrenIDs[FAR], farAABB, level + 1});
-                        stack.push_back(SplitStack{nextDim, std::move(near), childrenIDs[NEAR], nearAABB, level + 1});
+                        for(int s = 0; s < 2; s++) // for NEAR and FAR
+                        {
+                            // We don't know yet the child outputMesh BECAUSE
+                            // The memory is not yet allocated,
+                            // We have to know how many triangles in total there is for the current level for that, which is only
+                            // know when all the tasks will be completed.
+                            // When all tasks for the current level will be completed, the master thread
+                            // Will allocate a new buffer with this size (totalOutputTriangles final value x2).
+
+                            totalOutputTriangles += outputSizes[s];
+
+                            stack.push_back({
+                                .dim = nextDim,
+                                .nodeID = childrenIDs[s],
+                                .aabb = aabbs[s],
+                                .level = level + 1,
+                                .inputMesh = outputs[s],
+                                .inputMeshSize = outputSizes[s], // Filling that the master thread will also know which offset to give to outputMesh
+
+                                // WILL BE UPDATED BY MASTER THREAD
+                                .outputMesh = nullptr
+                            });
+                        }
                     }
                 }
                 else
                 {
                     // Leaf node
                     // Store the final mesh in the leaf node
-                    node.mesh = std::move(mesh);
 
-                    #pragma omp atomic
-                    m_totalLeafNodes++;
+                    #pragma omp critical
+                    {
+                        const auto offset = m_leavesBuffer.size();
 
-                    #pragma omp atomic
-                    m_totalLeafTriangles += node.mesh.size();
+                        // Reserve memory in the leaves buffer
+                        m_leavesBuffer.insert(m_leavesBuffer.end(), task.inputMesh, task.inputMesh + task.inputMeshSize);
+                        m_totalLeafNodes++;
+
+                        // We consider the leavesBuffer has enouhgh size and inserting won't invalidate pointers
+                        node.mesh = &m_leavesBuffer[offset];
+                        node.meshSize = task.inputMeshSize;
+
+                        // DO NOT increment totalOutputTriangles
+                        // Because this variable is used to compute the next output size,
+                        // but as this is a leaf there is no child node so no need for output for this node for the next level.
+                    }
                 }
             }
 
             #pragma omp taskwait
+
+            trace("Output buffer size: ", outputTriangles.size() * sizeof(outputTriangles[0]));
+
+            // Double buffering of temporary split buffer
+            using std::swap;
+            swap(inputTriangles, outputTriangles);
+
+            // Allocate the next output buffer
+            // We don't care of the content as it will be overwritten,
+            // if there is enough space no reallocation will occur wich is good
+            // The size of the next output buffer is upper bounded by twice the count of next total inputs.
+            outputTriangles.resize(totalOutputTriangles * 2);
+
+            {
+                // For each task, associate a unique offset in the new output buffer
+
+                int offset = 0; // Offset relative tot totalOutputTriangles
+
+                for(int i = 0; i < stack.size(); i++)
+                {
+                    auto& task = stack[i];
+                    task.outputMesh = &outputTriangles[offset * 2];
+
+                    offset += task.inputMeshSize;
+                }
+
+                // May be useful in parallelism, to spot some problem with race condition, like if one increment drop...
+                assert(offset == totalOutputTriangles);
+            }
 
             generatorLevel++;
         }
@@ -205,8 +321,9 @@ void KDTree::searchRecursive(const Point& pos, NodeID nodeID, float& currentDist
     {
         // We are on a leaf
         // Search brute force into the leaf node
-        for(const auto& triangleID: node.mesh)
+        for(int i = 0; i < node.meshSize; i++)
         {
+            const auto& triangleID = node.mesh[i];
             const auto nearestPtOnTriangle = findClosestPointOnTriangle(pos, m_mesh[triangleID]);
             const float d = nearestPtOnTriangle.distanceSquared(pos);
             if(d < currentDist)
@@ -257,14 +374,19 @@ void KDTree::searchRecursive(const Point& pos, NodeID nodeID, float& currentDist
     }
 }
 
-std::pair<KDTree::MeshAsID, KDTree::MeshAsID> KDTree::split(const MeshAsID& mesh, const Line& axe)
+void KDTree::split(const Triangle::ID *mesh, int meshSize, const Line& axe, Triangle::ID* const outputsOrig[2], int outputSizes[2])
 {
-    MeshAsID parts[2];
+    // Save locally to not modify original pointer
+    Triangle::ID* outputs[2];
+    outputs[NEAR] = outputsOrig[NEAR];
+    outputs[FAR] = outputsOrig[FAR];
+
 
     // Iterate all triangles,
     // We can't split them as they can belong to both sides
-    for(const auto& triangleID: mesh)
+    for(int i = 0; i < meshSize; i++)
     {
+        const auto& triangleID = mesh[i];
         const auto& triangle = m_mesh[triangleID];
 
         // If all points of the triangle are on one side, the triangle is not colliding with the other side (because
@@ -275,18 +397,21 @@ std::pair<KDTree::MeshAsID, KDTree::MeshAsID> KDTree::split(const MeshAsID& mesh
         {
             // All points are on the same side
             // So the triangle is on one side
-            parts[side].push_back(triangleID);
+            *(outputs[side]++) = (triangleID);
         }
         else
         {
             // All points are not on the same side
             // So the triangle is one both side
-            parts[NEAR].push_back(triangleID);
-            parts[FAR].push_back(triangleID);
+            *(outputs[NEAR]++) = (triangleID);
+            *(outputs[FAR]++) = (triangleID);
         }
     }
 
-    return {parts[NEAR], parts[FAR]};
+    for(int i = 0; i < 2; i++)
+    {
+        outputSizes[i] = static_cast<int>((outputs[i] - outputsOrig[i]));
+    }
 }
 
 KDTree::Point KDTree::findClosestPointOnTriangle(const KDTree::Point& query, const KDTree::Triangle& triangle)
